@@ -1,46 +1,107 @@
 import os
-import pymongo
-from pymongo import MongoClient
+import hashlib
+import json
+from elasticsearch import Elasticsearch, helpers
 from dotenv import load_dotenv
 import PyPDF2
 import docx
-import json
 import hashlib
 from tqdm import tqdm
 from typing import Dict, List, Optional, Union, Any
+import uuid
 
 # Load environment variables
 load_dotenv()
 
-class MongoDBConnector:
-    """Class to handle MongoDB connection and operations"""
+class ElasticsearchConnector:
+    """Class to handle Elasticsearch connection and operations"""
     
-    def __init__(self, connection_string: Optional[str] = None, db_name: str = "rag_db"):
-        """Initialize MongoDB connection
+    def __init__(self, hosts: Optional[List[str]] = None, index_prefix: str = "rag"):
+        """Initialize Elasticsearch connection
         
         Args:
-            connection_string: MongoDB connection string. If None, uses MONGO_URI from environment
-            db_name: Name of the database to use
+            hosts: List of Elasticsearch hosts. If None, uses ES_HOSTS from environment
+            index_prefix: Prefix for Elasticsearch indices
         """
-        if connection_string is None:
-            connection_string = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+        if hosts is None:
+            es_hosts = os.getenv("ES_HOSTS", "http://localhost:9200")
+            hosts = [host.strip() for host in es_hosts.split(",")]
         
-        self.client = MongoClient(connection_string)
-        self.db = self.client[db_name]
-        self.documents = self.db.documents
-        self.chunks = self.db.chunks
+        # Create Elasticsearch client
+        self.client = Elasticsearch(hosts)
         
-        # Create indexes
-        self.documents.create_index("doc_id", unique=True)
-        self.chunks.create_index("chunk_id", unique=True)
-        self.chunks.create_index("doc_id")
+        # Set up indices
+        self.index_prefix = index_prefix
+        self.doc_index = f"{index_prefix}_documents"
+        self.chunk_index = f"{index_prefix}_chunks"
         
+        # Create indices if they don't exist
+        self._create_indices()
+        
+    def _create_indices(self):
+        """Create the necessary Elasticsearch indices if they don't exist"""
+        # Documents index
+        if not self.client.indices.exists(index=self.doc_index):
+            self.client.indices.create(
+                index=self.doc_index,
+                body={
+                    "settings": {
+                        "number_of_shards": 1,
+                        "number_of_replicas": 0
+                    },
+                    "mappings": {
+                        "properties": {
+                            "doc_id": {"type": "keyword"},
+                            "source": {"type": "keyword"},
+                            "content_length": {"type": "integer"},
+                            "metadata": {"type": "object", "dynamic": True},
+                            "filename": {"type": "keyword"}
+                        }
+                    }
+                }
+            )
+            print(f"Created index: {self.doc_index}")
+        
+        # Chunks index
+        if not self.client.indices.exists(index=self.chunk_index):
+            self.client.indices.create(
+                index=self.chunk_index,
+                body={
+                    "settings": {
+                        "number_of_shards": 1,
+                        "number_of_replicas": 0
+                    },
+                    "mappings": {
+                        "properties": {
+                            "chunk_id": {"type": "keyword"},
+                            "doc_id": {"type": "keyword"},
+                            "content": {
+                                "type": "text", 
+                                "analyzer": "standard",
+                                "fields": {
+                                    "keyword": {"type": "keyword", "ignore_above": 256}
+                                }
+                            },
+                            "chunk_index": {"type": "integer"},
+                            "metadata": {"type": "object", "dynamic": True},
+                            "vector": {
+                                "type": "dense_vector",
+                                "dims": 768,
+                                "index": True,
+                                "similarity": "cosine"
+                            }
+                        }
+                    }
+                }
+            )
+            print(f"Created index: {self.chunk_index}")
+    
     def close(self):
-        """Close MongoDB connection"""
-        self.client.close()
+        """Close Elasticsearch connection"""
+        pass  # Elasticsearch client handles connection pooling automatically
         
     def insert_document(self, document: Dict[str, Any]) -> str:
-        """Insert a document into the documents collection
+        """Insert a document into the documents index
         
         Args:
             document: Document to insert
@@ -48,11 +109,20 @@ class MongoDBConnector:
         Returns:
             Inserted document ID
         """
-        result = self.documents.insert_one(document)
-        return str(result.inserted_id)
+        doc_id = document.get("doc_id")
+        if not doc_id:
+            raise ValueError("Document must have a doc_id field")
+            
+        self.client.index(
+            index=self.doc_index,
+            id=doc_id,
+            document=document,
+            refresh=True
+        )
+        return doc_id
     
     def insert_chunks(self, chunks: List[Dict[str, Any]]) -> List[str]:
-        """Insert document chunks into the chunks collection
+        """Insert document chunks into the chunks index
         
         Args:
             chunks: List of chunks to insert
@@ -62,9 +132,25 @@ class MongoDBConnector:
         """
         if not chunks:
             return []
+        
+        chunk_ids = []
+        actions = []
+        
+        for chunk in chunks:
+            chunk_id = chunk.get("chunk_id")
+            if not chunk_id:
+                raise ValueError("Each chunk must have a chunk_id field")
+                
+            chunk_ids.append(chunk_id)
+            action = {
+                "_index": self.chunk_index,
+                "_id": chunk_id,
+                "_source": chunk
+            }
+            actions.append(action)
             
-        result = self.chunks.insert_many(chunks)
-        return [str(id) for id in result.inserted_ids]
+        helpers.bulk(self.client, actions, refresh=True)
+        return chunk_ids
     
     def get_document_by_id(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a document by its ID
@@ -75,7 +161,11 @@ class MongoDBConnector:
         Returns:
             Document dict if found, None otherwise
         """
-        return self.documents.find_one({"doc_id": doc_id})
+        try:
+            result = self.client.get(index=self.doc_index, id=doc_id)
+            return result["_source"]
+        except Exception:
+            return None
     
     def get_chunks_by_doc_id(self, doc_id: str) -> List[Dict[str, Any]]:
         """Retrieve all chunks for a document
@@ -86,20 +176,55 @@ class MongoDBConnector:
         Returns:
             List of chunk dicts
         """
-        return list(self.chunks.find({"doc_id": doc_id}))
+        query = {
+            "query": {
+                "term": {
+                    "doc_id": doc_id
+                }
+            },
+            "sort": [
+                {"chunk_index": {"order": "asc"}}
+            ],
+            "size": 10000  # Adjust if you have more chunks per document
+        }
+        
+        result = self.client.search(index=self.chunk_index, body=query)
+        return [hit["_source"] for hit in result["hits"]["hits"]]
+    
+    def search_chunks(self, query_text: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search for chunks using text query
+        
+        Args:
+            query_text: The text query to search for
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of matching chunks
+        """
+        query = {
+            "query": {
+                "match": {
+                    "content": query_text
+                }
+            },
+            "size": limit
+        }
+        
+        result = self.client.search(index=self.chunk_index, body=query)
+        return [hit["_source"] for hit in result["hits"]["hits"]]
 
 
 class DocumentProcessor:
-    """Class to process documents for import into MongoDB"""
+    """Class to process documents for import into Elasticsearch"""
     
-    def __init__(self, db_connector: MongoDBConnector, chunk_size: int = 1000):
+    def __init__(self, es_connector: ElasticsearchConnector, chunk_size: int = 1000):
         """Initialize document processor
         
         Args:
-            db_connector: MongoDB connector instance
+            es_connector: Elasticsearch connector instance
             chunk_size: Size of text chunks in characters
         """
-        self.db = db_connector
+        self.es = es_connector
         self.chunk_size = chunk_size
         
     def _generate_doc_id(self, filepath: str, content: str) -> str:
@@ -237,7 +362,7 @@ class DocumentProcessor:
         }
         
         # Insert document
-        self.db.insert_document(document)
+        self.es.insert_document(document)
         
         # Process chunks
         text_chunks = self._chunk_text(text)
@@ -250,11 +375,13 @@ class DocumentProcessor:
                 "content": chunk_text,
                 "chunk_index": i,
                 "metadata": doc_metadata.copy() if doc_metadata else {}
+                # Note: Vector embeddings should be added here, but we leave as None for now
+                # as they would typically be added by a separate embedding process
             }
             chunks.append(chunk)
             
         # Insert chunks
-        self.db.insert_chunks(chunks)
+        self.es.insert_chunks(chunks)
         
         return doc_id
         
@@ -326,21 +453,21 @@ def main():
     """Simple CLI for document import"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Import documents to MongoDB for RAG system")
+    parser = argparse.ArgumentParser(description="Import documents to Elasticsearch for RAG system")
     parser.add_argument("source", help="File or directory to process")
     parser.add_argument("--recursive", "-r", action="store_true", help="Process directories recursively")
     parser.add_argument("--chunk-size", type=int, default=1000, help="Chunk size in characters")
-    parser.add_argument("--db-name", default="rag_db", help="MongoDB database name")
-    parser.add_argument("--mongodb-uri", help="MongoDB connection URI")
+    parser.add_argument("--index-prefix", default="rag", help="Elasticsearch index prefix")
+    parser.add_argument("--es-hosts", help="Elasticsearch hosts (comma separated)")
     
     args = parser.parse_args()
     
-    # Setup MongoDB connection
-    mongo_uri = args.mongodb_uri or os.getenv("MONGO_URI", "mongodb://localhost:27017/")
-    db = MongoDBConnector(mongo_uri, args.db_name)
+    # Setup Elasticsearch connection
+    hosts = args.es_hosts.split(",") if args.es_hosts else None
+    es = ElasticsearchConnector(hosts=hosts, index_prefix=args.index_prefix)
     
     # Initialize document processor
-    processor = DocumentProcessor(db, args.chunk_size)
+    processor = DocumentProcessor(es, args.chunk_size)
     
     try:
         # Process source
@@ -354,7 +481,7 @@ def main():
         else:
             print(f"Source not found: {args.source}")
     finally:
-        db.close()
+        es.close()
 
 
 if __name__ == "__main__":
