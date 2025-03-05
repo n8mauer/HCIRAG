@@ -1,6 +1,6 @@
 # HCIRAG
 
-A Retrieval Augmented Generation (RAG) system using MongoDB for document storage and retrieval.
+A Retrieval Augmented Generation (RAG) system using MongoDB for document storage and retrieval of Human Computer Interaction (HCI) required reading.
 
 ## Overview
 
