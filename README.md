@@ -1,15 +1,16 @@
 # HCIRAG
 
-A Retrieval Augmented Generation (RAG) system using MongoDB for document storage and retrieval of Human Computer Interaction (HCI) required reading.
+A Retrieval Augmented Generation (RAG) system using Elasticsearch for document storage and retrieval of Human Computer Interaction (HCI) required reading.
 
 ## Overview
 
-HCIRAG is a powerful RAG system designed to enhance your AI applications by providing efficient document storage, retrieval, and generation capabilities. By leveraging MongoDB's document storage capabilities, this system offers a robust solution for knowledge management and AI-powered content generation.
+HCIRAG is a powerful RAG system designed to enhance your AI applications by providing efficient document storage, retrieval, and generation capabilities. By leveraging Elasticsearch's advanced search capabilities including vector search, this system offers a robust solution for knowledge management and AI-powered content generation.
 
 ## Features
 
-- **Document Storage**: Efficiently store and manage documents in MongoDB
-- **Semantic Retrieval**: Find relevant documents based on semantic similarity
+- **Document Storage**: Store and manage documents in Elasticsearch with robust indexing
+- **Vector Search**: Find relevant documents using semantic vector search for accurate retrieval
+- **Full-text Search**: Leverage Elasticsearch's powerful text search capabilities
 - **Content Generation**: Generate high-quality content augmented with retrieved information
 - **Scalable Architecture**: Built to handle growing document collections
 
@@ -18,61 +19,128 @@ HCIRAG is a powerful RAG system designed to enhance your AI applications by prov
 ### Prerequisites
 
 - Python 3.8+
-- MongoDB 4.4+
+- Elasticsearch 8.0+
 - pip (Python package manager)
 
 ### Installation
 
 ```bash
-git clone https://github.com/yourusername/HCIRAG.git
+git clone https://github.com/n8mauer/HCIRAG.git
 cd HCIRAG
 pip install -r requirements.txt
 ```
 
+### Setting up Elasticsearch
+
+1. **Install Elasticsearch**:
+
+   - **Ubuntu/Debian**:
+     ```bash
+     # Import Elasticsearch GPG key
+     wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | sudo gpg --dearmor -o /usr/share/keyrings/elasticsearch-keyring.gpg
+     
+     # Add Elasticsearch repository
+     echo "deb [signed-by=/usr/share/keyrings/elasticsearch-keyring.gpg] https://artifacts.elastic.co/packages/8.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-8.x.list
+     
+     # Install Elasticsearch
+     sudo apt-get update && sudo apt-get install elasticsearch
+     ```
+
+   - **macOS** (using Homebrew):
+     ```bash
+     brew tap elastic/tap
+     brew install elastic/tap/elasticsearch-full
+     ```
+
+   - **Windows**: Download installer from the [Elasticsearch website](https://www.elastic.co/downloads/elasticsearch)
+
+2. **Start Elasticsearch**:
+
+   - **Ubuntu/Debian**:
+     ```bash
+     sudo systemctl start elasticsearch
+     sudo systemctl enable elasticsearch
+     ```
+
+   - **macOS**:
+     ```bash
+     elasticsearch
+     ```
+     Or as a service:
+     ```bash
+     brew services start elastic/tap/elasticsearch-full
+     ```
+
+3. **Verify Elasticsearch is running**:
+   ```bash
+   curl http://localhost:9200
+   ```
+
 ### Configuration
 
-1. Create a `.env` file in the root directory with the following variables:
+1. Create a `.env` file in the root directory based on the provided `.env.example`:
    ```
-   MONGODB_URI=your_mongodb_connection_string
-   API_KEY=your_api_key_for_llm_provider
+   ES_HOSTS=http://localhost:9200
+   ES_INDEX_PREFIX=rag
+   CHUNK_SIZE=1000
    ```
 
-2. Customize the configuration in `config.py` according to your needs.
+## Importing Documents
 
-## Usage
+```bash
+# Import a single file
+python src/import_utils.py path/to/document.pdf
 
-### Basic Example
+# Import all documents in a directory
+python src/import_utils.py path/to/documents/ --recursive
 
-```python
-from hcirag import HCIRAG
+# Set custom chunk size
+python src/import_utils.py path/to/documents/ --chunk-size 1500
 
-# Initialize the system
-rag = HCIRAG()
-
-# Add documents
-rag.add_documents("path/to/documents/")
-
-# Query the system
-results = rag.query("Your question here")
-print(results.generated_response)
+# Use a custom Elasticsearch host
+python src/import_utils.py path/to/documents/ --es-hosts http://elasticsearch:9200
 ```
 
-### Advanced Usage
+Supported document formats:
+- PDF (.pdf)
+- Word Documents (.docx)
+- Plain Text (.txt)
 
-See the `examples/` directory for more advanced usage scenarios.
+## Vector Search
+
+The system includes support for vector embeddings in the `rag_chunks` index. To use this feature:
+
+1. Generate vector embeddings for your text chunks using a model like Sentence Transformers
+2. Update the chunks in Elasticsearch with the vector embeddings
+3. Use Elasticsearch's vector search capabilities for semantic retrieval
+
+Example vector search query:
+```python
+# Using the Elasticsearch Python client
+from elasticsearch import Elasticsearch
+
+es = Elasticsearch("http://localhost:9200")
+query = {
+    "knn": {
+        "vector": {
+            "vector": your_query_vector,
+            "k": 10
+        }
+    }
+}
+results = es.search(index="rag_chunks", body=query)
+```
 
 ## Project Structure
 
 ```
 HCIRAG/
-├── src/                # Source code
-│   ├── retriever/      # Document retrieval components
-│   ├── generator/      # Content generation components
-│   └── storage/        # MongoDB storage interfaces
-├── examples/           # Example usage scripts
-├── tests/              # Unit and integration tests
-├── docs/               # Documentation
-└── README.md           # This file
+├── data/              # Directory for storing document files to be processed
+├── models/            # Directory for storing vector embeddings and model files
+├── notebooks/         # Jupyter notebooks for experimentation and demonstrations
+├── src/               # Source code
+│   ├── import_utils.py  # Utilities for importing documents into Elasticsearch
+└── requirements.txt   # Project dependencies
 ```
 
 ## Contributing
@@ -91,5 +159,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- [MongoDB](https://www.mongodb.com/) for the powerful document database
-- [LLM Provider] for the generation capabilities
+- [Elasticsearch](https://www.elastic.co/) for the powerful search and vector capabilities
+- [PyPDF2](https://pypi.org/project/PyPDF2/) and [python-docx](https://python-docx.readthedocs.io/) for document processing
+- [LangChain](https://www.langchain.com/) for RAG integration
